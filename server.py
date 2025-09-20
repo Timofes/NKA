@@ -3,6 +3,7 @@ import threading
 import datetime
 import sys
 import json
+from time import sleep
 from typing import Dict
 
 from lib.include.User import User
@@ -83,28 +84,6 @@ class ChatServer:
                 code="SUCCESS"
             )
 
-            # Простая проверка корректности NDFA
-            if not ndfa.V:
-                ans.error_count += 1
-                ans.error_msg.append("Алфавит не может быть пустым")
-
-            if not ndfa.Q:
-                ans.error_count += 1
-                ans.error_msg.append("Состояния не могут быть пустыми")
-
-            if not ndfa.q0:
-                ans.error_count += 1
-                ans.error_msg.append("Начальное состояние не задано")
-
-            if ndfa.q0 and ndfa.q0 not in ndfa.Q:
-                ans.error_count += 1
-                ans.error_msg.append(f"Начальное состояние '{ndfa.q0}' не найдено в Q")
-
-            for state in ndfa.F:
-                if state not in ndfa.Q:
-                    ans.error_count += 1
-                    ans.error_msg.append(f"Конечное состояние '{state}' не найдено в Q")
-
             return ans
 
         except Exception as e:
@@ -124,77 +103,121 @@ class ChatServer:
                 self.remove_client(client)
 
     def remove_client(self, client):
-        if client in self.clients:
-            index = self.clients.index(client)
-            nickname = self.nicknames[index]
-            self.clients.remove(client)
-            self.nicknames.remove(nickname)
-            try:
-                self.broadcast(f"👋 {nickname} left the chat.".encode('utf-8'))
-            except:
-                pass
-            client.close()
-            print(f"❌ {nickname} disconnected")
+        try:
+            if client in self.clients:
+                index = self.clients.index(client)
+                nickname = self.nicknames[index]
+                print(f"🔍 [DEBUG] Removing client {nickname} from list")
+                self.clients.remove(client)
+                self.nicknames.remove(nickname)
+                try:
+                    if self.clients:  # Только если есть другие клиенты
+                        print(f"🔍 [DEBUG] Broadcasting leave message for {nickname}")
+                        self.broadcast(f"👋 {nickname} left the chat.".encode('utf-8'))
+                except Exception as e:
+                    print(f"🔍 [DEBUG] Error broadcasting leave message: {e}")
+                try:
+                    print(f"🔍 [DEBUG] Closing socket for {nickname}")
+                    client.close()
+                    print(f"🔍 [DEBUG] Socket closed for {nickname}")
+                except Exception as e:
+                    print(f"🔍 [DEBUG] Error closing socket: {e}")
+                print(f"❌ {nickname} disconnected")
+            else:
+                print(f"🔍 [DEBUG] Client not found in list, already removed?")
+        except ValueError:
+            print(f"🔍 [DEBUG] ValueError in remove_client, client already removed")
+        except Exception as e:
+            print(f"🔍 [DEBUG] Unexpected error in remove_client: {e}")
 
     def handle_client(self, client, nickname):
-        while True:
-            try:
-                # Получаем длину JSON данных
-                length_bytes = client.recv(4)
-                if not length_bytes:
-                    self.remove_client(client)
-                    break
-
-                data_length = int.from_bytes(length_bytes, 'big')
-
-                # Получаем JSON данные
-                json_data = b''
-                while len(json_data) < data_length:
-                    chunk = client.recv(min(4096, data_length - len(json_data)))
-                    if not chunk:
-                        break
-                    json_data += chunk
-
-                if not json_data:
-                    self.remove_client(client)
-                    break
-
+        try:
+            while True:
                 try:
-                    # Парсим JSON
-                    data = json.loads(json_data.decode('utf-8'))
-                    user_data = data.get("user", {})
-                    ndfa_data = data.get("data", {})
+                    print(f"🔍 [DEBUG] Waiting for data from {nickname}...")
 
+                    # Получаем длину JSON данных
+                    length_bytes = client.recv(4)
+                    if not length_bytes:
+                        print(f"🔍 [DEBUG] No length bytes from {nickname}, breaking")
+                        break
+
+                    data_length = int.from_bytes(length_bytes, 'big')
+                    print(f"🔍 [DEBUG] Expected data length: {data_length} from {nickname}")
+
+                    # Получаем JSON данные
+                    json_data = b''
+                    while len(json_data) < data_length:
+                        chunk = client.recv(min(4096, data_length - len(json_data)))
+                        if not chunk:
+                            print(f"🔍 [DEBUG] No chunk data from {nickname}, breaking")
+                            break
+                        json_data += chunk
+
+                    if not json_data:
+                        print(f"🔍 [DEBUG] No JSON data from {nickname}, breaking")
+                        break
+
+                    try:
+                        # Парсим JSON
+                        data = json.loads(json_data.decode('utf-8'))
+                        user_data = data.get("user", {})
+                        ndfa_data = data.get("data", {})
+
+                        print(
+                            f"📨 Received from {nickname}: UserID={user_data.get('id')}, TaskID={user_data.get('id_task')}")
+
+                        # Обрабатываем данные
+                        ans = self.process_ndfa_data(user_data, ndfa_data)
+
+                        # Отправляем ответ
+                        sleep(2000)
+                        ans_json = json.dumps(ans.to_dict()).encode('utf-8')
+                        ans_length = len(ans_json).to_bytes(4, 'big')
+
+                        print(f"🔍 [SERVER] Sending response: {len(ans_json)} bytes")
+                        client.send(ans_length + ans_json)
+                        print(f"📤 Sent response to {nickname}")
+
+                    except json.JSONDecodeError as e:
+                        print(f"❌ Invalid JSON from {nickname}: {e}")
+                        error_ans = Ans(
+                            id=0,
+                            id_task=0,
+                            error_count=1,
+                            error_msg=["Invalid JSON format"],
+                            code="ERROR"
+                        )
+                        error_json = json.dumps(error_ans.to_dict()).encode('utf-8')
+                        error_length = len(error_json).to_bytes(4, 'big')
+                        client.send(error_length + error_json)
+
+                except ConnectionResetError:
+                    print(f"🔌 Connection reset by {nickname}")
+                    break
+                except BrokenPipeError:
+                    print(f"🔌 Broken pipe for {nickname}")
+                    break
+                except OSError as e:
                     print(
-                        f"📨 Received from {nickname}: UserID={user_data.get('id')}, TaskID={user_data.get('id_task')}")
+                        f"🔌 OSError for {nickname}: {e} (winerror: {e.winerror if hasattr(e, 'winerror') else 'N/A'})")
+                    if hasattr(e, 'winerror') and e.winerror == 10038:
+                        print(f"🔌 Socket operation on non-socket for {nickname}")
+                        break
+                    else:
+                        raise
+                except Exception as e:
+                    print(f"🔌 Unexpected error in inner loop for {nickname}: {e}")
+                    break
 
-                    # Обрабатываем данные
-                    ans = self.process_ndfa_data(user_data, ndfa_data)
-
-                    # Отправляем ответ
-                    ans_json = json.dumps(ans.to_dict()).encode('utf-8')
-                    ans_length = len(ans_json).to_bytes(4, 'big')
-
-                    client.send(ans_length + ans_json)
-                    print(f"📤 Sent response to {nickname}")
-
-                except json.JSONDecodeError:
-                    print(f"❌ Invalid JSON from {nickname}")
-                    error_ans = Ans(
-                        id=0,
-                        id_task=0,
-                        error_count=1,
-                        error_msg=["Invalid JSON format"],
-                        code="ERROR"
-                    )
-                    error_json = json.dumps(error_ans.to_dict()).encode('utf-8')
-                    error_length = len(error_json).to_bytes(4, 'big')
-                    client.send(error_length + error_json)
-
-            except Exception as e:
-                print(f"Error handling client {nickname}: {e}")
-                self.remove_client(client)
-                break
+        except Exception as e:
+            print(f"❌ Error handling client {nickname}: {e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            print(f"🔍 [DEBUG] Finally block for {nickname}, removing client")
+            # Убеждаемся, что клиент удаляется при любом исходе
+            self.remove_client(client)
 
     def shutdown(self):
         print("🔌 Shutting down server...")
